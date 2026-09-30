@@ -16,7 +16,8 @@ class TelegramNotifier:
         topic_tugas_id: Optional[int] = None,
         topic_jadwal_id: Optional[int] = None,
         topic_server_id: Optional[int] = None,
-        topic_status_id: Optional[int] = None
+        topic_status_id: Optional[int] = None,
+        topic_general_id: Optional[int] = None
     ):
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -26,6 +27,7 @@ class TelegramNotifier:
         self.topic_jadwal_id = topic_jadwal_id
         self.topic_server_id = topic_server_id
         self.topic_status_id = topic_status_id
+        self.topic_general_id = topic_general_id
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.file_base_url = f"https://api.telegram.org/file/bot{self.bot_token}"
 
@@ -101,6 +103,33 @@ class TelegramNotifier:
         except Exception as e:
             logger.error("Exception kirim pesan Telegram: %s", e)
             return None
+
+    def send_message_to_general(
+        self,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Mengirim pesan ke topik General (Forum Topic 1 atau Non-topic fallback).
+        Mencoba dengan topic_general_id terlebih dahulu, dan fallback tanpa thread ID jika tidak ditemukan.
+        """
+        target_thread = self.topic_general_id
+        res = self.send_message(
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            message_thread_id=target_thread
+        )
+        if res is None and target_thread is not None:
+            logger.info("Gagal kirim ke topic_general_id %s, mencoba fallback tanpa message_thread_id...", target_thread)
+            res = self.send_message(
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                message_thread_id=None
+            )
+        return res
 
     def edit_message_text(
         self,
@@ -357,6 +386,50 @@ class TelegramNotifier:
         # Kirim ke topik status jika ada, atau ke chat_id utama
         target_thread = self.topic_status_id or self.topic_presensi_id
         return self.send_message(message, reply_markup=inline_keyboard, message_thread_id=target_thread)
+
+    def notify_ethol_down(
+        self,
+        alasan: str,
+        waktu: str
+    ) -> Optional[Dict[str, Any]]:
+        """Mengirim notifikasi ke topik General bahwa server ETHOL sedang tidak bisa diakses / down."""
+        lines = [
+            "🚨 <b>PERINGATAN: SERVER ETHOL TIDAK DAPAT DIAKSES!</b>",
+            "",
+            "🔴 <b>Status</b> : <b>Down / Gangguan Akses</b>",
+            f"🕒 <b>Waktu Terdeteksi</b> : {html.escape(str(waktu))}",
+            "⚠️ <b>Penyebab / Detail Masalah</b> :",
+            f"<code>{html.escape(str(alasan))}</code>",
+            "",
+            "🤖 <i>Bot AutoAbsen akan terus memantau di latar belakang dan otomatis memberi tahu di topik ini saat server ETHOL kembali normal.</i>"
+        ]
+        message = "\n".join(lines)
+        return self.send_message_to_general(message)
+
+    def notify_ethol_recovered(
+        self,
+        waktu: str,
+        durasi: Optional[str] = None,
+        nama: Optional[str] = None,
+        nrp: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Mengirim notifikasi ke topik General bahwa server ETHOL sudah pulih dan dapat diakses kembali."""
+        lines = [
+            "✅ <b>PEMBERITAHUAN: SERVER ETHOL KEMBALI NORMAL!</b>",
+            "",
+            "🟢 <b>Status</b> : <b>Sudah Dapat Diakses Kembali</b>",
+            f"🕒 <b>Waktu Pulih</b> : {html.escape(str(waktu))}",
+        ]
+        if durasi:
+            lines.append(f"⏱️ <b>Durasi Gangguan</b> : {html.escape(str(durasi))}")
+        if nama and nrp:
+            lines.append(f"👤 <b>Akun Terhubung</b> : {html.escape(str(nama))} (NRP: {html.escape(str(nrp))})")
+        lines.extend([
+            "",
+            "🚀 <i>Sesi login berhasil diperbarui. Pemantauan presensi dan notifikasi kembali berjalan normal.</i>"
+        ])
+        message = "\n".join(lines)
+        return self.send_message_to_general(message)
 
     def format_status_text(
         self,

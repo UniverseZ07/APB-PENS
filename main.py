@@ -52,6 +52,23 @@ def format_id_datetime(dt: datetime, with_clock: bool = True) -> str:
     return f"{day_id}, {dt.day} {month_id} {dt.year}"
 
 
+def format_duration(seconds: int) -> str:
+    """Memformat durasi detik menjadi string yang mudah dibaca."""
+    if seconds < 60:
+        return f"{seconds} detik"
+    minutes = seconds // 60
+    rem_seconds = seconds % 60
+    if minutes < 60:
+        if rem_seconds > 0:
+            return f"{minutes} menit {rem_seconds} detik"
+        return f"{minutes} menit"
+    hours = minutes // 60
+    rem_minutes = minutes % 60
+    if rem_minutes > 0:
+        return f"{hours} jam {rem_minutes} menit"
+    return f"{hours} jam"
+
+
 def load_attended_keys() -> set:
     if os.path.exists(ATTENDED_FILE):
         try:
@@ -127,6 +144,7 @@ class AutoAbsenApp:
         self.topic_jadwal_id = parse_topic_id(os.getenv("TOPIC_JADWAL_ID"))
         self.topic_server_id = parse_topic_id(os.getenv("TOPIC_SERVER_ID"))
         self.topic_status_id = parse_topic_id(os.getenv("TOPIC_STATUS_ID"))
+        self.topic_general_id = parse_topic_id(os.getenv("TOPIC_GENERAL_ID"))
 
         self.client = EtholClient(email=self.email, password=self.password)
         self.telegram = TelegramNotifier(
@@ -137,7 +155,8 @@ class AutoAbsenApp:
             topic_tugas_id=self.topic_tugas_id,
             topic_jadwal_id=self.topic_jadwal_id,
             topic_server_id=self.topic_server_id,
-            topic_status_id=self.topic_status_id
+            topic_status_id=self.topic_status_id,
+            topic_general_id=self.topic_general_id
         )
         self.attended_keys = load_attended_keys()
         self.notified_notif_ids = load_notified_notifs()
@@ -153,6 +172,12 @@ class AutoAbsenApp:
         self.active_ui_session: Optional[Dict[str, Any]] = None
         self.ui_timeout_seconds = 180  # 3 menit timeout otomatis untuk mengembalikan ke menu utama default
         self.last_morning_briefing_date: Optional[str] = None
+
+        # State monitoring server ETHOL down / recover
+        self.is_ethol_down = False
+        self.ethol_down_since: Optional[float] = None
+        self.ethol_down_since_str: Optional[str] = None
+        self.ethol_down_reason: Optional[str] = None
 
     def get_current_time_str(self) -> str:
         now = datetime.now(self.tz)
@@ -1186,7 +1211,9 @@ class AutoAbsenApp:
         self.check_morning_briefing()
 
         if not self.client.ensure_authenticated():
+            err_detail = self.client.last_error_detail or "Gagal autentikasi ke ETHOL"
             logger.error("Gagal autentikasi ke ETHOL.")
+            self._handle_ethol_down(err_detail)
             return 0
 
         presensi_acted = 0
@@ -1336,11 +1363,59 @@ class AutoAbsenApp:
 
         return presensi_acted
 
+    def _handle_ethol_down(self, reason: str):
+        """Menangani saat server ETHOL terdeteksi down / tidak dapat diakses."""
+        if not self.is_ethol_down:
+            self.is_ethol_down = True
+            self.ethol_down_since = time.time()
+            self.ethol_down_since_str = self.get_current_time_str()
+            self.ethol_down_reason = reason
+            logger.warning(
+                "ETHOL Down terdeteksi pada %s. Alasan: %s. Mengirim notifikasi ke General...",
+                self.ethol_down_since_str, reason
+            )
+            try:
+                self.telegram.notify_ethol_down(alasan=reason, waktu=self.ethol_down_since_str)
+            except Exception as e:
+                logger.error("Gagal mengirim notifikasi ETHOL down: %s", e)
+        else:
+            self.ethol_down_reason = reason
+
+    def _handle_ethol_recovered(self):
+        """Menangani saat server ETHOL pulih kembali setelah down."""
+        if self.is_ethol_down:
+            self.is_ethol_down = False
+            waktu_pulih = self.get_current_time_str()
+            durasi_str = None
+            if self.ethol_down_since:
+                durasi_sec = int(time.time() - self.ethol_down_since)
+                durasi_str = format_duration(durasi_sec)
+            nama = self.get_student_name()
+            nrp = self.get_student_nrp()
+            logger.info(
+                "ETHOL Pulih kembali pada %s (durasi gangguan: %s). Mengirim notifikasi ke General...",
+                waktu_pulih, durasi_str
+            )
+            try:
+                self.telegram.notify_ethol_recovered(
+                    waktu=waktu_pulih,
+                    durasi=durasi_str,
+                    nama=nama,
+                    nrp=nrp
+                )
+            except Exception as e:
+                logger.error("Gagal mengirim notifikasi ETHOL pulih: %s", e)
+            finally:
+                self.ethol_down_since = None
+                self.ethol_down_since_str = None
+                self.ethol_down_reason = None
+
     def refresh_ethol_session_if_needed(self) -> bool:
         """Pastikan sesi ETHOL selalu aktif di background tanpa perlu logout / intervensi manual."""
         if self.client.is_logged_in():
             self.relogin_retry_delay = 30
             self.next_relogin_at = 0.0
+            self._handle_ethol_recovered()
             return True
 
         now = time.monotonic()
@@ -1354,14 +1429,17 @@ class AutoAbsenApp:
             self.relogin_retry_delay = 30
             self.next_relogin_at = 0.0
             logger.info("Relogin otomatis ETHOL berhasil.")
+            self._handle_ethol_recovered()
             return True
 
         self.next_relogin_at = now + self.relogin_retry_delay
+        err_detail = self.client.last_error_detail or "Gagal login / menghubungkan ke server ETHOL"
         logger.error(
-            "Relogin ETHOL gagal. Percobaan berikutnya dalam %s detik.",
-            self.relogin_retry_delay
+            "Relogin ETHOL gagal. Percobaan berikutnya dalam %s detik. Detail: %s",
+            self.relogin_retry_delay, err_detail
         )
         self.relogin_retry_delay = min(self.relogin_retry_delay * 2, 2 * 60)
+        self._handle_ethol_down(err_detail)
         return False
 
     def run(self):
@@ -1379,13 +1457,6 @@ class AutoAbsenApp:
         if not self.refresh_ethol_session_if_needed():
             err_detail = self.client.last_error_detail or "Gagal menghubungi server ETHOL / CAS SSO"
             logger.error("Login awal gagal: %s! Memeriksa ulang dalam interval berikutnya...", err_detail)
-            startup_msg = (
-                "⚠️ <b>AutoAbsen Bot Dinyalakan, namun Belum Berhasil Masuk ke ETHOL.</b>\n\n"
-                f"📌 <b>Status / Detail Masalah:</b>\n<b>{html.escape(err_detail)}</b>\n\n"
-                "🤖 <i>Bot akan otomatis mencoba menghubungkan kembali secara berkala di latar belakang.</i>"
-            )
-            target_thread = self.topic_status_id or self.topic_presensi_id
-            self.telegram.send_message(startup_msg, message_thread_id=target_thread)
         else:
             nama = self.get_student_name()
             nrp = self.get_student_nrp()
@@ -1394,14 +1465,14 @@ class AutoAbsenApp:
 
         while self.is_running:
             try:
+                # Periksa interaksi dan perintah Telegram serta timeout UI
+                self.handle_telegram_commands()
+                self.check_ui_inactivity_timeout()
+
                 session_ready = self.refresh_ethol_session_if_needed()
                 if not session_ready:
                     logger.warning("Relogin otomatis gagal; menunggu siklus berikutnya.")
                 else:
-                    # Periksa interaksi dan perintah Telegram
-                    self.handle_telegram_commands()
-                    self.check_ui_inactivity_timeout()
-
                     # Periksa notifikasi, materi/tugas baru, dan lakukan presensi otomatis
                     self.check_and_attend()
             except Exception as e:
