@@ -1,0 +1,17 @@
+[Unit]
+Description=AutoAbsen ETHOL PENS Telegram Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=ary
+WorkingDirectory=/home/ary/autoabsen
+# Menggunakan virtualenv jika dibuat, atau python3 sistem jika tanpa virtualenv:
+ExecStart=/bin/bash -c 'if [ -d venv ]; then ./venv/bin/python main.py; else /usr/bin/python3 main.py; fi'
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

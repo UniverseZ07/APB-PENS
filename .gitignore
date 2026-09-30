@@ -1,0 +1,22 @@
+# Environment variables & credentials
+.env
+ChatID.txt
+IDBotTele.txt
+
+# Python & Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# Session cache & local databases
+attended_keys.json
+notified_notifs.json
+*.log
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
